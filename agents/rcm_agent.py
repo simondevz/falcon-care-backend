@@ -1,217 +1,222 @@
 """
-FalconCare MVP - AI-Native RCM Platform
-FastAPI Backend Application Entry Point with RCM Agent Integration
+RCM Agent implementation with LangGraph-style workflow execution
 """
 
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer
-from contextlib import asynccontextmanager
-import uvicorn
-from datetime import datetime
-
-from database.connection import engine, get_db
-from models import patient, encounter, claim, denial
-from controllers import (
-    patient_controller,
-    encounter_controller,
-    claims_controller,
-    auth_controller,
-    rcm_chat_controller,
+from typing import Dict, Any, Optional
+from langchain.schema.messages import HumanMessage, AIMessage, SystemMessage
+from agents.utils.models import (
+    RCMAgentState,
+    WorkflowStep,
+    PatientData,
+    EncounterData,
 )
-from utils.auth import get_current_user
-
-
-# Create all tables
-async def create_tables():
-    async with engine.begin() as conn:
-        await conn.run_sync(patient.Base.metadata.create_all)
-        await conn.run_sync(encounter.Base.metadata.create_all)
-        await conn.run_sync(claim.Base.metadata.create_all)
-        await conn.run_sync(denial.Base.metadata.create_all)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    await create_tables()
-    print("🏥 FalconCare Backend Started Successfully")
-    print("🤖 RCM AI Agent Initialized")
-    yield
-    # Shutdown
-    print("🔄 FalconCare Backend Shutting Down")
-
-
-app = FastAPI(
-    title="FalconCare MVP API",
-    description="AI-Native Revenue Cycle Management Platform with LangGraph Agents",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan,
+from agents.actions.user_interaction import (
+    initialize_rcm_state,
+    process_user_input,
+    generate_user_agent_decision,
 )
-
-# CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+from agents.actions.data_structuring import structure_clinical_data
+from agents.actions.medical_coding import suggest_medical_codes
+from agents.actions.eligibility_checking import check_patient_eligibility
+from agents.actions.claim_processing import process_claim_submission
+from agents.utils.conditionals import (
+    should_continue_processing,
+    get_next_workflow_step,
 )
-
-# Security
-security = HTTPBearer()
+import asyncio
 
 
-# Health Check
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0",
-        "service": "FalconCare MVP Backend",
-        "features": {
-            "ai_agent": "enabled",
-            "langgraph": "enabled",
-            "rcm_workflows": "enabled",
-        },
-    }
+class RCMAgentExecutor:
+    """Executor for RCM workflow steps"""
 
-
-# Authentication Routes
-app.include_router(auth_controller.router, prefix="/auth", tags=["Authentication"])
-
-# Patient Management Routes
-app.include_router(
-    patient_controller.router,
-    prefix="/patients",
-    tags=["Patients"],
-    dependencies=[Depends(get_current_user)],
-)
-
-# Encounter Routes
-app.include_router(
-    encounter_controller.router,
-    prefix="/encounters",
-    tags=["Encounters"],
-    dependencies=[Depends(get_current_user)],
-)
-
-# Claims Routes
-app.include_router(
-    claims_controller.router,
-    prefix="/claims",
-    tags=["Claims"],
-    dependencies=[Depends(get_current_user)],
-)
-
-# RCM AI Agent Chat Interface
-app.include_router(
-    rcm_chat_controller.router,
-    prefix="/ai",
-    tags=["AI Agent"],
-    dependencies=[Depends(get_current_user)],
-)
-
-
-# Legacy Chat Interface (for backward compatibility)
-@app.post("/chat")
-async def legacy_chat_interface(
-    message: dict, current_user: dict = Depends(get_current_user)
-):
-    """
-    Legacy chat interface - redirects to new AI agent endpoint
-    """
-    from agents.rcm_agent import (
-        RCMAgentExecutor,
-        create_initial_state,
-        format_agent_response,
-    )
-
-    user_message = message.get("message", "")
-
-    if not user_message:
-        raise HTTPException(status_code=400, detail="Message is required")
-
-    try:
-        # Create executor and initial state
-        executor = RCMAgentExecutor()
-        initial_state = create_initial_state(user_input=user_message)
-
-        # Execute agent step
-        result_state = executor.execute_step(initial_state, user_message)
-        result = format_agent_response(result_state)
-
-        return {
-            "response": result.get("result")
-            or result.get("question_to_ask")
-            or "RCM agent processed your request",
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": current_user["user_id"],
-            "agent_result": result,
-            "note": "This endpoint is deprecated. Please use /ai/chat for enhanced functionality.",
-        }
-    except Exception as e:
-        return {
-            "response": f"I encountered an error: {str(e)}",
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": current_user["user_id"],
-            "error": True,
+    def __init__(self):
+        self.workflow_functions = {
+            WorkflowStep.INITIALIZATION: self._initialize_workflow,
+            WorkflowStep.DATA_COLLECTION: self._process_data_collection,
+            WorkflowStep.DATA_STRUCTURING: self._structure_data,
+            WorkflowStep.MEDICAL_CODING: self._process_medical_coding,
+            WorkflowStep.ELIGIBILITY_CHECKING: self._check_eligibility,
+            WorkflowStep.CLAIM_PROCESSING: self._process_claim,
+            WorkflowStep.COMPLETED: self._handle_completion,
         }
 
+    def execute_step(
+        self, state: RCMAgentState, user_input: Optional[str] = None
+    ) -> RCMAgentState:
+        """Execute a single workflow step"""
+        try:
+            # Add user input if provided
+            if user_input and user_input.strip():
+                state["messages"].append(HumanMessage(content=user_input))
+                state["need_user_input"] = False
 
-# AI Agent Status Endpoint
-@app.get("/ai/status")
-async def ai_agent_status(current_user: dict = Depends(get_current_user)):
-    """
-    Get AI agent status and capabilities
-    """
-    return {
-        "status": "active",
-        "agent_type": "RCM LangGraph Agent",
-        "capabilities": [
-            "Clinical data structuring",
-            "Medical coding (ICD-10, CPT)",
-            "Insurance eligibility verification",
-            "Claim processing and submission",
-            "Denial management",
-        ],
-        "workflow_steps": [
-            "data_collection",
-            "data_structuring",
-            "medical_coding",
-            "eligibility_checking",
-            "claim_processing",
-        ],
-        "supported_payers": ["DAMAN", "ADNIC", "THIQA", "BUPA"],
-        "confidence_thresholds": {
-            "auto_approve": 0.9,
-            "human_review": 0.7,
-            "reject": 0.5,
-        },
+            # Get current workflow step
+            current_step = state.get("workflow_step", WorkflowStep.INITIALIZATION)
+
+            # Execute the appropriate workflow function
+            if current_step in self.workflow_functions:
+                state = self.workflow_functions[current_step](state)
+            else:
+                state["error_message"] = f"Unknown workflow step: {current_step}"
+                state["status"] = "error"
+
+            # Continue processing if no user input needed and not done
+            max_iterations = 5
+            iterations = 0
+
+            while (
+                not state.get("need_user_input")
+                and not state.get("done")
+                and not state.get("error_message")
+                and iterations < max_iterations
+            ):
+                iterations += 1
+                next_step = get_next_workflow_step(state)
+
+                if next_step != state.get("workflow_step"):
+                    state["workflow_step"] = next_step
+                    print(f"🔄 Moving to next step: {next_step}")
+
+                    # Execute the next step
+                    if next_step in self.workflow_functions:
+                        state = self.workflow_functions[next_step](state)
+                    else:
+                        break
+                else:
+                    break
+
+            return state
+
+        except Exception as e:
+            state["error_message"] = f"Execution error: {str(e)}"
+            state["status"] = "error"
+            return state
+
+    def _initialize_workflow(self, state: RCMAgentState) -> RCMAgentState:
+        """Initialize the workflow"""
+        return initialize_rcm_state(state)
+
+    def _process_data_collection(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle data collection phase"""
+        # Process user input if needed
+        if state.get("need_user_input") and state["messages"]:
+            state = process_user_input(state)
+
+        # Generate user agent decision
+        if not state.get("need_user_input") and not state.get("exit_requested"):
+            state = generate_user_agent_decision(state)
+
+        return state
+
+    def _structure_data(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle data structuring phase"""
+        return structure_clinical_data(state)
+
+    def _process_medical_coding(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle medical coding phase"""
+        return suggest_medical_codes(state)
+
+    def _check_eligibility(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle eligibility checking phase"""
+        return check_patient_eligibility(state)
+
+    def _process_claim(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle claim processing phase"""
+        # Note: This needs to be async in real implementation
+        try:
+            # For now, we'll run the async function in a sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(process_claim_submission(state))
+            loop.close()
+            return result
+        except Exception as e:
+            state["error_message"] = f"Claim processing error: {str(e)}"
+            state["status"] = "error"
+            return state
+
+    def _handle_completion(self, state: RCMAgentState) -> RCMAgentState:
+        """Handle workflow completion"""
+        if not state.get("result"):
+            state["result"] = "RCM workflow completed successfully"
+        state["done"] = True
+        state["status"] = "completed"
+        return state
+
+
+def create_initial_state(
+    user_input: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> RCMAgentState:
+    """Create initial RCM agent state"""
+    state: RCMAgentState = {
+        "messages": [],
+        "patient_data": None,
+        "encounter_data": None,
+        "structured_data": None,
+        "suggested_codes": None,
+        "eligibility_result": None,
+        "claim_data": None,
+        "status": "collecting",
+        "workflow_step": WorkflowStep.INITIALIZATION,
+        "question_to_ask": None,
+        "ready_for_processing": False,
+        "need_user_input": True,
+        "done": False,
+        "exit_requested": False,
+        "result": None,
+        "error_message": None,
+        "confidence_scores": {},
+        "user_context": context or {},
     }
 
+    # Add initial user input if provided
+    if user_input:
+        state["user_context"]["initial_input"] = user_input
+        state["user_context"]["api_mode"] = True
 
-# Error Handlers
-@app.exception_handler(404)
-async def not_found_handler(request, exc):
+    if patient_id:
+        state["user_context"]["patient_id"] = patient_id
+
+    return state
+
+
+def format_agent_response(state: RCMAgentState) -> Dict[str, Any]:
+    """Format agent state for API response"""
     return {
-        "error": "Resource not found",
-        "detail": str(exc),
-        "timestamp": datetime.utcnow().isoformat(),
+        "status": state.get("status"),
+        "workflow_step": str(state.get("workflow_step", "")),
+        "question_to_ask": state.get("question_to_ask"),
+        "result": state.get("result"),
+        "error_message": state.get("error_message"),
+        "done": state.get("done", False),
+        "need_user_input": state.get("need_user_input", False),
+        "confidence_scores": state.get("confidence_scores", {}),
+        "patient_data": (
+            state["patient_data"].model_dump() if state.get("patient_data") else None
+        ),
+        "encounter_data": (
+            state["encounter_data"].model_dump()
+            if state.get("encounter_data")
+            else None
+        ),
+        "structured_data": (
+            state["structured_data"].model_dump()
+            if state.get("structured_data")
+            else None
+        ),
+        "suggested_codes": (
+            state["suggested_codes"].model_dump()
+            if state.get("suggested_codes")
+            else None
+        ),
+        "eligibility_result": (
+            state["eligibility_result"].model_dump()
+            if state.get("eligibility_result")
+            else None
+        ),
+        "claim_data": (
+            state["claim_data"].model_dump() if state.get("claim_data") else None
+        ),
     }
-
-
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    return {
-        "error": "Internal server error",
-        "detail": "An unexpected error occurred",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")

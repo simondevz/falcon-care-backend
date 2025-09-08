@@ -129,27 +129,59 @@ def generate_user_agent_decision(state: RCMAgentState) -> RCMAgentState:
     )
 
     try:
-        # Create decision prompt
+        # Check if we have all required information
+        current_patient = state.get("patient_data")
+        current_encounter = state.get("encounter_data")
+
+        # Determine what information we still need
+        missing_info = []
+
+        if not current_patient or not current_patient.name:
+            missing_info.append("patient name")
+        if not current_patient or not current_patient.date_of_birth:
+            missing_info.append("date of birth")
+        if not current_patient or not current_patient.gender:
+            missing_info.append("gender")
+        if not current_patient or not current_patient.insurance_provider:
+            missing_info.append("insurance provider")
+        if not current_patient or not current_patient.policy_number:
+            missing_info.append("policy number")
+        if not current_patient or not current_patient.mrn:
+            missing_info.append("medical record number (MRN)")
+        if not current_encounter or not current_encounter.encounter_type:
+            missing_info.append("encounter type")
+        if not current_encounter or not current_encounter.service_date:
+            missing_info.append("service date")
+        if not current_encounter or not current_encounter.raw_clinical_notes:
+            missing_info.append("clinical notes")
+
+        # Create enhanced decision prompt with current state
         decision_prompt = f"""
 {user_agent_prompt}
 
-Current workflow step: {state['workflow_step']}
-Current patient data: {state.get('patient_data')}
-Current encounter data: {state.get('encounter_data')}
+Current Information Status:
+Patient Data: {current_patient.model_dump() if current_patient else "None"}
+Encounter Data: {current_encounter.model_dump() if current_encounter else "None"}
 
-Based on the conversation, decide what to do:
-1. "ask_user" - Need more information from user
-2. "proceed" - Have enough info to proceed to next processing step
-3. "finalize" - Task is complete
+Missing Information: {missing_info if missing_info else "None - all required info collected"}
 
-Keep your message simple and clear without special formatting.
+Recent conversation context:
+{' '.join([msg.content for msg in state["messages"][-3:] if hasattr(msg, 'content')])}
+
+Based on the conversation and current information status, decide:
+1. If missing critical information: use "ask_user" and ask for the FIRST missing item
+2. If all required information is collected: use "proceed" 
+3. If workflow is complete: use "finalize"
+
+Respond with a clear, professional message.
 """
 
         # Get decision from LLM
         structured_llm = llm.with_structured_output(UserAgentDecision)
 
         decision = structured_llm.invoke(
-            [SystemMessage(content=decision_prompt)] + state["messages"]
+            [SystemMessage(content=decision_prompt)]
+            + state["messages"][-5:]  # Last 5 messages for context
         )
 
         console.print(
@@ -181,7 +213,7 @@ Keep your message simple and clear without special formatting.
 
             state["messages"].append(
                 AIMessage(
-                    content="Great! I have the information needed. Processing your clinical data now..."
+                    content="Great! I have all the information needed. Let me process the clinical data and suggest appropriate medical codes..."
                 )
             )
             state["patient_data"] = patient_data
@@ -214,7 +246,7 @@ Keep your message simple and clear without special formatting.
             f"❌ Error in generate_user_agent_decision: {e}", style="bold red"
         )
         state["question_to_ask"] = (
-            "I had trouble understanding your request. Could you please clarify the patient encounter details?"
+            "I had trouble understanding your request. Could you please provide the patient's basic information: name, date of birth, and insurance details?"
         )
         state["status"] = "collecting"
         state["need_user_input"] = True
@@ -229,41 +261,195 @@ def extract_healthcare_data_from_messages(
     Extract patient and encounter data from conversation messages.
     """
     try:
-        # Use LLM to extract structured healthcare data
-        patient_extractor = llm.with_structured_output(PatientData)
-        encounter_extractor = llm.with_structured_output(EncounterData)
+        # Combine all user messages for extraction
+        user_messages = [msg.content for msg in messages if msg.type == "human"]
+        combined_text = " ".join(user_messages)
 
-        extraction_prompt = """
-Extract healthcare information from this conversation.
-Look for patient demographics, insurance information, encounter details, and clinical notes.
-If information is not mentioned, leave fields as null.
+        console.print(
+            f"🔍 Extracting data from: {combined_text[:200]}...", style="bold blue"
+        )
+
+        # Extract using a single LLM call with manual parsing
+        extraction_prompt = f"""
+Please extract patient and encounter information from this healthcare conversation and format it as JSON.
+
+Conversation: {combined_text}
+
+Extract the following information and return ONLY a JSON object in this exact format:
+{{
+    "patient": {{
+        "name": "patient full name or null",
+        "date_of_birth": "YYYY-MM-DD format or null", 
+        "gender": "male/female/other or null",
+        "insurance_provider": "insurance company name or null",
+        "policy_number": "policy number or null",
+        "mrn": "medical record number or null"
+    }},
+    "encounter": {{
+        "encounter_type": "outpatient/inpatient/emergency/telemedicine or null",
+        "service_date": "YYYY-MM-DD format or null",
+        "chief_complaint": "main complaint or null",
+        "raw_clinical_notes": "full clinical notes or null"
+    }}
+}}
+
+Return only the JSON, no other text.
 """
 
-        # Extract patient data
-        patient_data = patient_extractor.invoke(
-            [
-                SystemMessage(
-                    content=extraction_prompt
-                    + "\nFocus on patient demographics and insurance information."
-                )
-            ]
-            + messages
-        )
+        response = llm.invoke([SystemMessage(content=extraction_prompt)])
 
-        # Extract encounter data
-        encounter_data = encounter_extractor.invoke(
-            [
-                SystemMessage(
-                    content=extraction_prompt
-                    + "\nFocus on encounter details, clinical notes, and services provided."
-                )
-            ]
-            + messages
-        )
+        # Parse the JSON response
+        import json
+        import re
 
-        return patient_data, encounter_data
+        # Extract JSON from response
+        json_match = re.search(r"\{.*\}", response.content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group()
+            data = json.loads(json_str)
+
+            # Create PatientData object
+            patient_info = data.get("patient", {})
+            patient_data = PatientData(
+                name=patient_info.get("name"),
+                date_of_birth=patient_info.get("date_of_birth"),
+                gender=patient_info.get("gender"),
+                insurance_provider=patient_info.get("insurance_provider"),
+                policy_number=patient_info.get("policy_number"),
+                mrn=patient_info.get("mrn"),
+            )
+
+            # Create EncounterData object
+            encounter_info = data.get("encounter", {})
+            encounter_data = EncounterData(
+                encounter_type=encounter_info.get("encounter_type"),
+                service_date=encounter_info.get("service_date"),
+                chief_complaint=encounter_info.get("chief_complaint"),
+                raw_clinical_notes=encounter_info.get("raw_clinical_notes"),
+            )
+
+            console.print(
+                f"✅ Successfully extracted patient: {patient_data.name}",
+                style="bold green",
+            )
+            console.print(
+                f"✅ Successfully extracted encounter: {encounter_data.encounter_type}",
+                style="bold green",
+            )
+
+            return patient_data, encounter_data
+        else:
+            console.print("⚠️ No JSON found in response", style="bold yellow")
+            raise ValueError("No valid JSON in response")
 
     except Exception as e:
         console.print(f"⚠️ Could not extract healthcare data: {e}", style="bold yellow")
-        # Return empty data if extraction fails
-        return PatientData(), EncounterData()
+        console.print(f"⚠️ Attempting fallback extraction...", style="bold yellow")
+
+        # Fallback: Manual regex extraction
+        try:
+            combined_text = " ".join(
+                [msg.content for msg in messages if msg.type == "human"]
+            )
+
+            # Extract patient data using regex patterns
+            import re
+
+            # Patient name
+            name_match = re.search(
+                r"Patient:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            name = name_match.group(1).strip() if name_match else None
+
+            # Date of birth
+            dob_match = re.search(r"DOB:\s*(\d{4}-\d{2}-\d{2})", combined_text)
+            if not dob_match:
+                dob_match = re.search(r"(\d{4}-\d{2}-\d{2})", combined_text)
+            dob = dob_match.group(1) if dob_match else None
+
+            # Gender
+            gender_match = re.search(r"(Male|Female|male|female)", combined_text)
+            gender = gender_match.group(1).lower() if gender_match else None
+
+            # Insurance
+            insurance_match = re.search(
+                r"Insurance:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            if not insurance_match:
+                insurance_match = re.search(
+                    r"(DAMAN|ADNIC|THIQA|BUPA)", combined_text, re.IGNORECASE
+                )
+            insurance = insurance_match.group(1).strip() if insurance_match else None
+
+            # Policy number
+            policy_match = re.search(
+                r"Policy\s+Number:\s*([^\s,\n]+)", combined_text, re.IGNORECASE
+            )
+            policy = policy_match.group(1).strip() if policy_match else None
+
+            # MRN
+            mrn_match = re.search(r"MRN:\s*([^\s,\n]+)", combined_text, re.IGNORECASE)
+            mrn = mrn_match.group(1).strip() if mrn_match else None
+
+            # Encounter type
+            encounter_match = re.search(
+                r"Encounter:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            if not encounter_match:
+                encounter_match = re.search(
+                    r"(Outpatient|Inpatient|Emergency|outpatient|inpatient|emergency)",
+                    combined_text,
+                )
+            encounter_type = (
+                encounter_match.group(1).strip() if encounter_match else None
+            )
+
+            # Service date
+            service_date_match = re.search(r"on\s+(\d{4}-\d{2}-\d{2})", combined_text)
+            service_date = service_date_match.group(1) if service_date_match else None
+
+            # Chief complaint
+            complaint_match = re.search(
+                r"Chief\s+Complaint:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            chief_complaint = (
+                complaint_match.group(1).strip() if complaint_match else None
+            )
+
+            # Clinical notes (everything after "Clinical Notes:")
+            notes_match = re.search(
+                r"Clinical\s+Notes:\s*(.+)", combined_text, re.IGNORECASE | re.DOTALL
+            )
+            clinical_notes = notes_match.group(1).strip() if notes_match else None
+
+            patient_data = PatientData(
+                name=name,
+                date_of_birth=dob,
+                gender=gender,
+                insurance_provider=insurance,
+                policy_number=policy,
+                mrn=mrn,
+            )
+
+            encounter_data = EncounterData(
+                encounter_type=encounter_type,
+                service_date=service_date,
+                chief_complaint=chief_complaint,
+                raw_clinical_notes=clinical_notes,
+            )
+
+            console.print(
+                f"✅ Fallback extraction - Patient: {name}", style="bold cyan"
+            )
+            console.print(
+                f"✅ Fallback extraction - Encounter: {encounter_type}",
+                style="bold cyan",
+            )
+
+            return patient_data, encounter_data
+
+        except Exception as fallback_error:
+            console.print(
+                f"⚠️ Fallback extraction failed: {fallback_error}", style="bold red"
+            )
+            return PatientData(), EncounterData()

@@ -5,6 +5,7 @@ Medical coding agent for ICD-10 and CPT code suggestions - API Compatible
 from langchain.schema.messages import SystemMessage, AIMessage
 from agents.utils.initializer import get_llm
 from agents.utils.models import (
+    MedicalCode,
     RCMAgentState,
     SuggestedCodes,
     CodingDecision,
@@ -27,6 +28,8 @@ def suggest_medical_codes(state: RCMAgentState) -> RCMAgentState:
         return state
 
     try:
+        print(f"🔄 Starting medical coding step")
+
         # Get structured clinical data
         structured_data = state.get("structured_data")
         patient_data = state.get("patient_data")
@@ -44,29 +47,85 @@ def suggest_medical_codes(state: RCMAgentState) -> RCMAgentState:
                 "policy_number": patient_data.policy_number,
             }
 
-        # Create coding LLM
-        coding_llm = llm.with_structured_output(CodingDecision)
+        # Create coding prompt
+        coding_prompt = f"""
+You are a medical coding expert specializing in ICD-10 and CPT coding. Based on the structured clinical data, suggest appropriate medical codes.
 
-        # Format the prompt
-        prompt_content = medical_coding_prompt.format(
-            structured_data=json.dumps(structured_data.model_dump(), default=str),
-            payer_info=json.dumps(payer_info, default=str),
-        )
+Structured Clinical Data: {json.dumps(structured_data.model_dump(), default=str)}
+Payer Information: {json.dumps(payer_info, default=str)}
 
-        decision = coding_llm.invoke(
-            [SystemMessage(content=prompt_content)] + state["messages"]
-        )
+Suggest appropriate codes and return ONLY a JSON object:
+{{
+    "icd10_codes": [
+        {{
+            "code": "ICD-10 code",
+            "description": "code description", 
+            "confidence": 0.9,
+            "rationale": "reason for selection"
+        }}
+    ],
+    "cpt_codes": [
+        {{
+            "code": "CPT code",
+            "description": "procedure description",
+            "confidence": 0.9,
+            "rationale": "reason for selection",
+            "modifier": "modifier if applicable or null"
+        }}
+    ],
+    "overall_confidence": 0.9,
+    "requires_human_review": false
+}}
 
-        state["messages"].append(AIMessage(content=decision.message))
+Return only the JSON, no other text.
+"""
 
-        if decision.action == DecisionAction.PROCEED and decision.suggested_codes:
-            state["suggested_codes"] = decision.suggested_codes
+        response = llm.invoke([SystemMessage(content=coding_prompt)])
 
-            # Calculate overall confidence from individual code confidences
-            all_codes = (
-                decision.suggested_codes.icd10_codes
-                + decision.suggested_codes.cpt_codes
+        # Parse the JSON response
+        import re
+
+        json_match = re.search(r"\{.*\}", response.content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group()
+            codes_data = json.loads(json_str)
+
+            # Create MedicalCode objects
+            icd10_codes = []
+            for code_info in codes_data.get("icd10_codes", []):
+                icd10_codes.append(
+                    MedicalCode(
+                        code=code_info["code"],
+                        description=code_info["description"],
+                        confidence=code_info["confidence"],
+                        rationale=code_info["rationale"],
+                    )
+                )
+
+            cpt_codes = []
+            for code_info in codes_data.get("cpt_codes", []):
+                cpt_codes.append(
+                    MedicalCode(
+                        code=code_info["code"],
+                        description=code_info["description"],
+                        confidence=code_info["confidence"],
+                        rationale=code_info["rationale"],
+                        modifier=code_info.get("modifier"),
+                    )
+                )
+
+            # Create SuggestedCodes object
+            suggested_codes = SuggestedCodes(
+                icd10_codes=icd10_codes,
+                cpt_codes=cpt_codes,
+                overall_confidence=codes_data.get("overall_confidence", 0.8),
+                requires_human_review=codes_data.get("requires_human_review", False),
             )
+
+            state["suggested_codes"] = suggested_codes
+
+            # Calculate overall confidence
+            all_codes = icd10_codes + cpt_codes
             if all_codes:
                 avg_confidence = sum(code.confidence for code in all_codes) / len(
                     all_codes
@@ -74,9 +133,9 @@ def suggest_medical_codes(state: RCMAgentState) -> RCMAgentState:
                 state["confidence_scores"]["medical_coding"] = avg_confidence
 
                 # Check if requires human approval
-                if decision.requires_approval or avg_confidence < 0.8:
+                if suggested_codes.requires_human_review or avg_confidence < 0.8:
                     state["question_to_ask"] = (
-                        f"Please review the suggested medical codes. Average confidence: {avg_confidence:.2f}. Do you approve these codes?"
+                        f"Medical codes suggested with {avg_confidence:.2f} confidence. Do you approve these codes?"
                     )
                     state["need_user_input"] = True
                     state["status"] = "reviewing"
@@ -84,6 +143,14 @@ def suggest_medical_codes(state: RCMAgentState) -> RCMAgentState:
                     # Auto-approve high confidence codes
                     state["workflow_step"] = WorkflowStep.ELIGIBILITY_CHECKING
                     state["status"] = "processing"
+                    state["messages"].append(
+                        AIMessage(
+                            content="Medical codes approved. Now checking patient eligibility..."
+                        )
+                    )
+                    print(
+                        f"✅ Medical coding completed with confidence: {avg_confidence}"
+                    )
             else:
                 state["question_to_ask"] = (
                     "No medical codes could be suggested. Please provide more specific clinical information."
@@ -91,33 +158,13 @@ def suggest_medical_codes(state: RCMAgentState) -> RCMAgentState:
                 state["need_user_input"] = True
                 state["status"] = "collecting"
                 state["workflow_step"] = WorkflowStep.DATA_COLLECTION
-
-        elif decision.action == DecisionAction.ASK_USER:
-            state["question_to_ask"] = decision.message
-            state["need_user_input"] = True
-            state["status"] = "collecting"
-            state["workflow_step"] = WorkflowStep.DATA_COLLECTION
-        elif decision.action == DecisionAction.ERROR:
-            state["error_message"] = decision.message
-            state["status"] = "error"
+        else:
+            raise ValueError("No valid JSON in response")
 
         return state
 
     except Exception as e:
         state["error_message"] = f"Medical coding error: {str(e)}"
         state["status"] = "error"
-        return state
-        return state
-
-    except Exception as e:
-        console.print(f"[bold red]❌ Error in medical coding: {e}[/bold red]")
-        console.print("[bold red]>>> Exception details:[/bold red]")
-        console.print(f"[red]Exception type: {type(e)}[/red]")
-        console.print(f"[red]Exception message: {str(e)}[/red]")
-        console.print("[red]Stack trace:[/red]")
-        traceback.print_exc()
-        console.print("[bold red]>>> End of exception details[/bold red]")
-
-        state["error_message"] = f"Medical coding error: {str(e)}"
-        state["status"] = "error"
+        print(f"❌ Medical coding error: {str(e)}")
         return state

@@ -3,9 +3,15 @@ RCM Agent data models and state management
 """
 
 from pydantic import BaseModel, Field
-from typing import TypedDict, Optional, List, Dict, Any
 from enum import Enum
 from langchain.schema.messages import BaseMessage
+
+from typing import Optional, List, Dict, Any
+
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
 
 
 # --- Enums ---
@@ -104,7 +110,6 @@ class ClaimData(BaseModel):
 class UserAgentDecision(BaseModel):
     action: DecisionAction
     message: str
-    next_step: Optional[WorkflowStep] = None
     confidence: Optional[float] = None
 
 
