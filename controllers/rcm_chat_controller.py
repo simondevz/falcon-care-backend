@@ -86,22 +86,38 @@ async def chat_with_rcm_agent(
         agent_response = format_agent_response(updated_state)
 
         # Determine AI response message
-        ai_message_content = "I'm processing your request..."
+        # ai_message_content = "I'm processing your request..."
 
-        if updated_state.get("question_to_ask"):
-            ai_message_content = updated_state["question_to_ask"]
-        elif updated_state.get("result"):
-            ai_message_content = updated_state["result"]
-        elif updated_state.get("error_message"):
-            ai_message_content = (
-                f"I encountered an issue: {updated_state['error_message']}"
-            )
-        elif updated_state.get("messages") and updated_state["messages"]:
-            # Get the last AI message
-            for msg in reversed(updated_state["messages"]):
-                if hasattr(msg, "type") and msg.type == "ai":
-                    ai_message_content = msg.content
-                    break
+        # if updated_state.get("question_to_ask"):
+        #     ai_message_content = updated_state["question_to_ask"]
+        # elif updated_state.get("result"):
+        #     ai_message_content = updated_state["result"]
+        # elif updated_state.get("error_message"):
+        #     ai_message_content = (
+        #         f"I encountered an issue: {updated_state['error_message']}"
+        #     )
+        # elif updated_state.get("messages") and updated_state["messages"]:
+        #     # Get the last AI message
+        #     for msg in reversed(updated_state["messages"]):
+        #         if hasattr(msg, "type") and msg.type == "ai":
+        #             ai_message_content = msg.content
+        #             break
+
+        # Generate contextual AI response using LLM
+        ai_message_content = await generate_contextual_response(updated_state)
+
+        # Add AI response to session history
+        ai_message = {
+            "role": "assistant",
+            "content": ai_message_content,
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent_data": {
+                "workflow_step": str(updated_state.get("workflow_step", "")),
+                "status": updated_state.get("status"),
+                "confidence_scores": updated_state.get("confidence_scores", {}),
+            },
+        }
+        session["messages"].append(ai_message)
 
         # Add AI response to session history
         ai_message = {
@@ -174,68 +190,208 @@ def generate_suggested_actions(state: Dict[str, Any]) -> list:
     workflow_step = str(state.get("workflow_step", ""))
     status = state.get("status")
 
-    if "data_structuring" in workflow_step and status == "processing":
-        actions.append(
-            {
-                "action": "review_structured_data",
-                "label": "Review Structured Data",
-                "description": "Review the extracted clinical information",
-            }
-        )
+    if status == "processing":
+        if "data_collection" in workflow_step.lower():
+            actions.append(
+                {
+                    "action": "view_progress",
+                    "label": "View Progress",
+                    "description": "See what information has been collected so far",
+                }
+            )
 
-    elif "medical_coding" in workflow_step and status == "reviewing":
-        actions.extend(
-            [
-                {
-                    "action": "approve_codes",
-                    "label": "Approve Medical Codes",
-                    "description": "Review and approve suggested ICD-10 and CPT codes",
-                },
-                {
-                    "action": "request_changes",
-                    "label": "Request Changes",
-                    "description": "Ask for modifications to the suggested codes",
-                },
-            ]
-        )
+        elif "data_structuring" in workflow_step.lower():
+            actions.extend(
+                [
+                    {
+                        "action": "view_structured_data",
+                        "label": "View Structured Data",
+                        "description": "See how clinical notes are being organized",
+                    },
+                    {
+                        "action": "cancel_processing",
+                        "label": "Cancel",
+                        "description": "Stop current processing",
+                    },
+                ]
+            )
 
-    elif "eligibility_checking" in workflow_step and status == "processing":
-        actions.append(
-            {
-                "action": "view_coverage",
-                "label": "View Coverage Details",
-                "description": "See detailed insurance coverage information",
-            }
-        )
+        elif "medical_coding" in workflow_step.lower():
+            actions.extend(
+                [
+                    {
+                        "action": "view_codes_preview",
+                        "label": "Preview Codes",
+                        "description": "See preliminary code suggestions",
+                    },
+                    {
+                        "action": "pause_for_review",
+                        "label": "Pause for Review",
+                        "description": "Stop and review before proceeding",
+                    },
+                ]
+            )
 
-    elif "claim_processing" in workflow_step and status == "reviewing":
-        actions.extend(
-            [
-                {
-                    "action": "submit_claim",
-                    "label": "Submit Claim",
-                    "description": "Submit the prepared claim to the payer",
-                },
-                {
-                    "action": "review_claim",
-                    "label": "Review Claim Details",
-                    "description": "Review claim before submission",
-                },
-            ]
-        )
+        elif "eligibility_checking" in workflow_step.lower():
+            actions.extend(
+                [
+                    {
+                        "action": "view_eligibility_status",
+                        "label": "Check Status",
+                        "description": "View current eligibility verification status",
+                    },
+                    {
+                        "action": "skip_eligibility",
+                        "label": "Skip Verification",
+                        "description": "Proceed without eligibility check",
+                    },
+                ]
+            )
+
+        elif "claim_processing" in workflow_step.lower():
+            actions.extend(
+                [
+                    {
+                        "action": "view_claim_preview",
+                        "label": "Preview Claim",
+                        "description": "Review claim before final submission",
+                    },
+                    {
+                        "action": "modify_claim",
+                        "label": "Modify Claim",
+                        "description": "Make changes to the claim data",
+                    },
+                ]
+            )
+
+    elif status == "reviewing":
+        if "codes" in str(state.get("question_to_ask", "")).lower():
+            actions.extend(
+                [
+                    {
+                        "action": "approve_codes",
+                        "label": "Approve All Codes",
+                        "description": "Accept all suggested medical codes and continue",
+                    },
+                    {
+                        "action": "review_individual_codes",
+                        "label": "Review Each Code",
+                        "description": "Review and modify individual codes",
+                    },
+                    {
+                        "action": "reject_codes",
+                        "label": "Reject Codes",
+                        "description": "Reject suggestions and provide new clinical information",
+                    },
+                ]
+            )
+
+        elif "eligibility" in str(state.get("question_to_ask", "")).lower():
+            actions.extend(
+                [
+                    {
+                        "action": "proceed_anyway",
+                        "label": "Proceed Anyway",
+                        "description": "Continue despite eligibility issues",
+                    },
+                    {
+                        "action": "check_alternative_coverage",
+                        "label": "Check Alternative Coverage",
+                        "description": "Look for other insurance options",
+                    },
+                    {
+                        "action": "convert_to_self_pay",
+                        "label": "Self-Pay Option",
+                        "description": "Process as self-pay patient",
+                    },
+                ]
+            )
+
+        elif "claim" in str(state.get("question_to_ask", "")).lower():
+            actions.extend(
+                [
+                    {
+                        "action": "submit_claim",
+                        "label": "Submit Claim Now",
+                        "description": "Submit the prepared claim to the payer",
+                    },
+                    {
+                        "action": "review_claim_details",
+                        "label": "Review Details",
+                        "description": "Examine all claim components before submission",
+                    },
+                    {
+                        "action": "save_as_draft",
+                        "label": "Save as Draft",
+                        "description": "Save claim for later submission",
+                    },
+                ]
+            )
 
     elif state.get("done") and state.get("claim_data"):
         actions.extend(
             [
                 {
-                    "action": "track_claim",
-                    "label": "Track Claim Status",
-                    "description": "Monitor the submitted claim progress",
+                    "action": "view_claim_summary",
+                    "label": "View Claim Summary",
+                    "description": "See complete claim details and submission status",
                 },
                 {
-                    "action": "start_new",
-                    "label": "Start New Case",
+                    "action": "track_claim_status",
+                    "label": "Track Claim",
+                    "description": "Monitor the submitted claim progress with payer",
+                },
+                {
+                    "action": "print_claim",
+                    "label": "Print Claim",
+                    "description": "Generate printable claim form",
+                },
+                {
+                    "action": "start_new_case",
+                    "label": "New Patient",
                     "description": "Begin processing a new patient encounter",
+                },
+            ]
+        )
+
+    elif state.get("error_message"):
+        actions.extend(
+            [
+                {
+                    "action": "retry_step",
+                    "label": "Retry",
+                    "description": "Attempt to retry the failed step",
+                },
+                {
+                    "action": "restart_workflow",
+                    "label": "Start Over",
+                    "description": "Begin the workflow from the beginning",
+                },
+                {
+                    "action": "get_help",
+                    "label": "Get Help",
+                    "description": "View troubleshooting information",
+                },
+            ]
+        )
+
+    elif status == "collecting":
+        actions.extend(
+            [
+                {
+                    "action": "provide_example",
+                    "label": "Show Example",
+                    "description": "See an example of the required information format",
+                },
+                {
+                    "action": "upload_document",
+                    "label": "Upload Document",
+                    "description": "Upload clinical notes or patient information file",
+                },
+                {
+                    "action": "skip_optional",
+                    "label": "Skip Optional Fields",
+                    "description": "Continue with only required information",
                 },
             ]
         )
@@ -385,3 +541,165 @@ async def process_encounter_with_agent(
         raise HTTPException(
             status_code=500, detail=f"Error processing encounter: {str(e)}"
         )
+
+
+async def generate_contextual_response(updated_state: Dict[str, Any]) -> str:
+    """Generate contextual user response using LLM based on full workflow state"""
+
+    # Import LLM here to avoid circular imports
+    from agents.utils.initializer import get_llm
+    from langchain.schema.messages import SystemMessage
+
+    llm = get_llm()
+
+    # Prepare comprehensive workflow context
+    workflow_context = {
+        "current_step": str(updated_state.get("workflow_step", "")).replace(
+            "WorkflowStep.", ""
+        ),
+        "status": updated_state.get("status"),
+        "done": updated_state.get("done", False),
+        "need_user_input": updated_state.get("need_user_input", False),
+        "error_message": updated_state.get("error_message"),
+        "question_to_ask": updated_state.get("question_to_ask"),
+        "result": updated_state.get("result"),
+        "confidence_scores": updated_state.get("confidence_scores", {}),
+    }
+
+    # Add data summaries
+    patient_data = updated_state.get("patient_data")
+    if patient_data:
+        workflow_context["patient_summary"] = {
+            "name": getattr(patient_data, "name", None),
+            "insurance": getattr(patient_data, "insurance_provider", None),
+            "mrn": getattr(patient_data, "mrn", None),
+        }
+
+    encounter_data = updated_state.get("encounter_data")
+    if encounter_data:
+        workflow_context["encounter_summary"] = {
+            "type": getattr(encounter_data, "encounter_type", None),
+            "date": getattr(encounter_data, "service_date", None),
+            "chief_complaint": getattr(encounter_data, "chief_complaint", None),
+        }
+
+    structured_data = updated_state.get("structured_data")
+    if structured_data:
+        workflow_context["structured_data_available"] = True
+        workflow_context["diagnoses"] = getattr(structured_data, "diagnoses", [])
+        workflow_context["procedures"] = getattr(structured_data, "procedures", [])
+
+    suggested_codes = updated_state.get("suggested_codes")
+    if suggested_codes:
+        workflow_context["codes_summary"] = {
+            "icd10_count": len(getattr(suggested_codes, "icd10_codes", [])),
+            "cpt_count": len(getattr(suggested_codes, "cpt_codes", [])),
+            "overall_confidence": getattr(suggested_codes, "overall_confidence", 0),
+            "requires_review": getattr(suggested_codes, "requires_human_review", False),
+        }
+
+        # Include first few codes for context
+        icd_codes = getattr(suggested_codes, "icd10_codes", [])
+        cpt_codes = getattr(suggested_codes, "cpt_codes", [])
+
+        if icd_codes:
+            workflow_context["sample_icd_codes"] = [
+                {
+                    "code": getattr(code, "code", ""),
+                    "description": getattr(code, "description", ""),
+                    "confidence": getattr(code, "confidence", 0),
+                }
+                for code in icd_codes[:3]
+            ]
+
+        if cpt_codes:
+            workflow_context["sample_cpt_codes"] = [
+                {
+                    "code": getattr(code, "code", ""),
+                    "description": getattr(code, "description", ""),
+                    "confidence": getattr(code, "confidence", 0),
+                }
+                for code in cpt_codes[:3]
+            ]
+
+    eligibility_result = updated_state.get("eligibility_result")
+    if eligibility_result:
+        workflow_context["eligibility_summary"] = {
+            "eligible": getattr(eligibility_result, "eligible", False),
+            "payer_id": getattr(eligibility_result, "payer_id", ""),
+            "copay": getattr(eligibility_result, "copay_amount", 0),
+            "deductible_remaining": getattr(
+                eligibility_result, "deductible_remaining", 0
+            ),
+        }
+
+    claim_data = updated_state.get("claim_data")
+    if claim_data:
+        workflow_context["claim_summary"] = {
+            "claim_number": getattr(claim_data, "claim_number", ""),
+            "total_amount": getattr(claim_data, "total_amount", 0),
+            "patient_responsibility": getattr(claim_data, "patient_responsibility", 0),
+            "status": getattr(claim_data, "status", ""),
+            "submission_ready": getattr(claim_data, "submission_ready", False),
+        }
+
+    # Create response generation prompt
+    response_prompt = f"""
+You are a healthcare RCM (Revenue Cycle Management) AI assistant communicating with a healthcare provider. Based on the current workflow state, generate an appropriate response for the user.
+
+WORKFLOW CONTEXT:
+{json.dumps(workflow_context, indent=2, default=str)}
+
+GUIDELINES:
+1. Be conversational and professional
+2. Clearly explain what has happened and what's currently happening
+3. If there are next steps needed from the user, clearly state them
+4. If showing medical codes or data, format them nicely
+5. If there are errors, explain them clearly and suggest solutions
+6. If workflow is complete, provide a clear summary
+7. Use medical terminology appropriately but keep it accessible
+8. Be encouraging and supportive
+
+RESPONSE REQUIREMENTS:
+- Start with current status
+- Explain what was accomplished 
+- Show relevant data (codes, amounts, etc.) if available
+- Clearly state next steps or what user should do
+- Keep it concise but informative
+- Use bullet points or formatting for clarity when showing data
+
+Generate a response that would be helpful and informative for the healthcare provider:
+"""
+
+    try:
+        response = llm.invoke([SystemMessage(content=response_prompt)])
+        return response.content
+
+    except Exception as e:
+        # Fallback to simple message if LLM fails
+        if workflow_context.get("error_message"):
+            return f"I encountered an issue: {workflow_context['error_message']}"
+        elif workflow_context.get("question_to_ask"):
+            return workflow_context[
+                "question_to_ask"
+            ]  # Generate contextual AI response using LLM
+        # ai_message_content = await generate_contextual_response(updated_state)
+
+        # # Add AI response to session history
+        # ai_message = {
+        #     "role": "assistant",
+        #     "content": ai_message_content,
+        #     "timestamp": datetime.utcnow().isoformat(),
+        #     "agent_data": {
+        #         "workflow_step": str(updated_state.get("workflow_step", "")),
+        #         "status": updated_state.get("status"),
+        #         "confidence_scores": updated_state.get("confidence_scores", {}),
+        #     },
+        # }
+        # session["messages"].append(ai_message)
+        elif workflow_context.get("result"):
+            return workflow_context["result"]
+        elif workflow_context.get("done"):
+            return "RCM workflow completed successfully!"
+        else:
+            return f"Processing {workflow_context.get('current_step', 'workflow')}..."

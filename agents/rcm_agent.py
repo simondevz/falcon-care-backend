@@ -23,7 +23,6 @@ from agents.utils.conditionals import (
     should_continue_processing,
     get_next_workflow_step,
 )
-import asyncio
 
 
 class RCMAgentExecutor:
@@ -43,7 +42,7 @@ class RCMAgentExecutor:
     def execute_step(
         self, state: RCMAgentState, user_input: Optional[str] = None
     ) -> RCMAgentState:
-        """Execute a single workflow step"""
+        """Execute a single workflow step and continue processing automatically"""
         try:
             # Add user input if provided
             if user_input and user_input.strip():
@@ -52,6 +51,7 @@ class RCMAgentExecutor:
 
             # Get current workflow step
             current_step = state.get("workflow_step", WorkflowStep.INITIALIZATION)
+            print(f"🔄 Executing step: {current_step}")
 
             # Execute the appropriate workflow function
             if current_step in self.workflow_functions:
@@ -59,35 +59,126 @@ class RCMAgentExecutor:
             else:
                 state["error_message"] = f"Unknown workflow step: {current_step}"
                 state["status"] = "error"
+                return state
 
-            # Continue processing if no user input needed and not done
-            max_iterations = 5
+            # Continue processing automatically until user input is needed or workflow is done
+            max_iterations = 10
             iterations = 0
 
             while (
                 not state.get("need_user_input")
                 and not state.get("done")
                 and not state.get("error_message")
+                and state.get("status") != "reviewing"
                 and iterations < max_iterations
             ):
                 iterations += 1
+                previous_step = state.get("workflow_step")
                 next_step = get_next_workflow_step(state)
 
-                if next_step != state.get("workflow_step"):
-                    state["workflow_step"] = next_step
-                    print(f"🔄 Moving to next step: {next_step}")
+                print(
+                    f"🔍 Current step: {previous_step}, Next step: {next_step}, Iteration: {iterations}"
+                )
 
-                    # Execute the next step
+                # If next step is different, advance and execute
+                if next_step != previous_step:
                     if next_step in self.workflow_functions:
+                        state["workflow_step"] = next_step
+                        print(f"🔄 Auto-advancing to step: {next_step}")
+
+                        # Execute the next step
                         state = self.workflow_functions[next_step](state)
+
+                        print(f"✅ Completed step: {next_step}")
                     else:
+                        print(f"❌ Unknown workflow step: {next_step}")
                         break
                 else:
-                    break
+                    # Same step returned - check if we need to execute it again
+                    # This happens when a step needs to be re-executed (like data structuring)
+                    step_executed = False
+
+                    if (
+                        previous_step == WorkflowStep.DATA_STRUCTURING
+                        and not state.get("structured_data")
+                        and state.get("patient_data")
+                        and state.get("encounter_data")
+                    ):
+                        print(f"🔄 Re-executing DATA_STRUCTURING step")
+                        state = self.workflow_functions[WorkflowStep.DATA_STRUCTURING](
+                            state
+                        )
+                        step_executed = True
+
+                    elif (
+                        previous_step == WorkflowStep.MEDICAL_CODING
+                        and not state.get("suggested_codes")
+                        and state.get("structured_data")
+                    ):
+                        print(f"🔄 Re-executing MEDICAL_CODING step")
+                        state = self.workflow_functions[WorkflowStep.MEDICAL_CODING](
+                            state
+                        )
+                        step_executed = True
+
+                    elif (
+                        previous_step == WorkflowStep.ELIGIBILITY_CHECKING
+                        and not state.get("eligibility_result")
+                        and state.get("suggested_codes")
+                    ):
+                        print(f"🔄 Re-executing ELIGIBILITY_CHECKING step")
+                        state = self.workflow_functions[
+                            WorkflowStep.ELIGIBILITY_CHECKING
+                        ](state)
+                        step_executed = True
+
+                    elif (
+                        previous_step == WorkflowStep.CLAIM_PROCESSING
+                        and not state.get("claim_data")
+                        and state.get("eligibility_result")
+                    ):
+                        print(f"🔄 Re-executing CLAIM_PROCESSING step")
+                        state = self.workflow_functions[WorkflowStep.CLAIM_PROCESSING](
+                            state
+                        )
+                        step_executed = True
+
+                    if not step_executed:
+                        # No more steps to execute or re-execute
+                        print(
+                            f"🛑 Workflow progression stopped. Status: {state.get('status')}"
+                        )
+                        break
+
+            # Ensure we have a proper response message
+            if (
+                not state.get("question_to_ask")
+                and not state.get("result")
+                and not state.get("error_message")
+            ):
+                if state.get("done"):
+                    state["result"] = "RCM workflow completed successfully!"
+                elif state.get("need_user_input"):
+                    if not state.get("question_to_ask"):
+                        state["question_to_ask"] = (
+                            "Please provide additional information to continue."
+                        )
+                else:
+                    # Workflow is in progress, provide status update
+                    current_step_name = (
+                        str(state.get("workflow_step", ""))
+                        .replace("WorkflowStep.", "")
+                        .replace("_", " ")
+                        .title()
+                    )
+                    state["question_to_ask"] = (
+                        f"Processing {current_step_name}... Please wait."
+                    )
 
             return state
 
         except Exception as e:
+            print(f"❌ Execution error: {str(e)}")
             state["error_message"] = f"Execution error: {str(e)}"
             state["status"] = "error"
             return state
@@ -121,19 +212,8 @@ class RCMAgentExecutor:
         return check_patient_eligibility(state)
 
     def _process_claim(self, state: RCMAgentState) -> RCMAgentState:
-        """Handle claim processing phase"""
-        # Note: This needs to be async in real implementation
-        try:
-            # For now, we'll run the async function in a sync context
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(process_claim_submission(state))
-            loop.close()
-            return result
-        except Exception as e:
-            state["error_message"] = f"Claim processing error: {str(e)}"
-            state["status"] = "error"
-            return state
+        """Handle claim processing phase - SYNC VERSION"""
+        return process_claim_submission(state)
 
     def _handle_completion(self, state: RCMAgentState) -> RCMAgentState:
         """Handle workflow completion"""

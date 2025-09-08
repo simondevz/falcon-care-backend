@@ -452,4 +452,129 @@ Return only the JSON, no other text.
             console.print(
                 f"⚠️ Fallback extraction failed: {fallback_error}", style="bold red"
             )
-            return PatientData(), EncounterData()
+
+            # Last resort: dynamic regex extraction
+            combined_text = " ".join(
+                [msg.content for msg in messages if msg.type == "human"]
+            )
+
+            # Extract patient data using dynamic regex patterns
+            import re
+
+            # Patient name - look for "Patient: [Name]"
+            name_match = re.search(
+                r"Patient:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            name = name_match.group(1).strip() if name_match else None
+
+            # Date of birth - look for DOB: or date patterns
+            dob_match = re.search(
+                r"DOB:\s*(\d{4}-\d{2}-\d{2})", combined_text, re.IGNORECASE
+            )
+            if not dob_match:
+                dob_match = re.search(r"(\d{4}-\d{2}-\d{2})", combined_text)
+            dob = dob_match.group(1) if dob_match else None
+
+            # Gender - look for Male/Female
+            gender_match = re.search(r"\b(Male|Female)\b", combined_text, re.IGNORECASE)
+            gender = gender_match.group(1).lower() if gender_match else None
+
+            # Insurance - look for known providers or "Insurance: [Provider]"
+            insurance_match = re.search(
+                r"Insurance:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            if not insurance_match:
+                # Look for common insurance providers
+                insurance_match = re.search(
+                    r"\b(DAMAN[^,\n]*|ADNIC[^,\n]*|THIQA[^,\n]*|BUPA[^,\n]*)\b",
+                    combined_text,
+                    re.IGNORECASE,
+                )
+            insurance = insurance_match.group(1).strip() if insurance_match else None
+
+            # Policy number - look for alphanumeric patterns
+            policy_match = re.search(
+                r"Policy\s+Number:\s*([A-Z0-9]+)", combined_text, re.IGNORECASE
+            )
+            if not policy_match:
+                # Look for patterns like DM followed by numbers
+                policy_match = re.search(r"\b([A-Z]{2}\d{10,})\b", combined_text)
+            policy = policy_match.group(1) if policy_match else None
+
+            # MRN - look for MRN: pattern
+            mrn_match = re.search(r"MRN:\s*([A-Z0-9]+)", combined_text, re.IGNORECASE)
+            if not mrn_match:
+                # Look for MRN followed by numbers
+                mrn_match = re.search(r"\b(MRN\d+)\b", combined_text, re.IGNORECASE)
+            mrn = mrn_match.group(1) if mrn_match else None
+
+            # Encounter type - look for visit types
+            encounter_match = re.search(
+                r"Encounter:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            if not encounter_match:
+                encounter_match = re.search(
+                    r"\b(Outpatient|Inpatient|Emergency|Telemedicine)\b",
+                    combined_text,
+                    re.IGNORECASE,
+                )
+            encounter_type = (
+                encounter_match.group(1).strip().lower() if encounter_match else None
+            )
+
+            # Service date - look for date patterns
+            service_date_match = re.search(
+                r"on\s+(\d{4}-\d{2}-\d{2})", combined_text, re.IGNORECASE
+            )
+            if not service_date_match:
+                service_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", combined_text)
+            service_date = service_date_match.group(1) if service_date_match else None
+
+            # Chief complaint
+            complaint_match = re.search(
+                r"Chief\s+Complaint:\s*([^,\n]+)", combined_text, re.IGNORECASE
+            )
+            chief_complaint = (
+                complaint_match.group(1).strip() if complaint_match else None
+            )
+
+            # Clinical notes - extract everything after "Clinical Notes:"
+            notes_match = re.search(
+                r"Clinical\s+Notes:\s*(.+)", combined_text, re.IGNORECASE | re.DOTALL
+            )
+            clinical_notes = notes_match.group(1).strip() if notes_match else None
+
+            # If no clinical notes found, look for "Patient presents with"
+            if not clinical_notes:
+                presents_match = re.search(
+                    r"Patient presents with.+", combined_text, re.IGNORECASE | re.DOTALL
+                )
+                clinical_notes = (
+                    presents_match.group(0).strip() if presents_match else None
+                )
+
+            patient_data = PatientData(
+                name=name,
+                date_of_birth=dob,
+                gender=gender,
+                insurance_provider=insurance,
+                policy_number=policy,
+                mrn=mrn,
+            )
+
+            encounter_data = EncounterData(
+                encounter_type=encounter_type,
+                service_date=service_date,
+                chief_complaint=chief_complaint,
+                raw_clinical_notes=clinical_notes,
+            )
+
+            console.print(
+                f"✅ Dynamic extraction - Patient: {name}", style="bold magenta"
+            )
+            console.print(
+                f"✅ Dynamic extraction - Encounter: {encounter_type}",
+                style="bold magenta",
+            )
+
+            return patient_data, encounter_data

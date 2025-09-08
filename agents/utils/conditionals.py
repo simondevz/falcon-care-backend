@@ -31,6 +31,12 @@ def get_next_workflow_step(state: RCMAgentState) -> WorkflowStep:
     current_step = state.get("workflow_step", WorkflowStep.INITIALIZATION)
     status = state.get("status", "collecting")
 
+    print(f"🔍 get_next_workflow_step - Current: {current_step}, Status: {status}")
+    print(f"🔍 State keys: {list(state.keys())}")
+    print(f"🔍 Need user input: {state.get('need_user_input')}")
+    print(f"🔍 Done: {state.get('done')}")
+    print(f"🔍 Error: {state.get('error_message')}")
+
     # If we need user input, stay in data collection
     if state.get("need_user_input"):
         return WorkflowStep.DATA_COLLECTION
@@ -39,34 +45,69 @@ def get_next_workflow_step(state: RCMAgentState) -> WorkflowStep:
     if state.get("error_message"):
         return current_step
 
+    # If workflow is done, stay completed
+    if state.get("done"):
+        return WorkflowStep.COMPLETED
+
     # Normal workflow progression
     if current_step == WorkflowStep.INITIALIZATION:
         return WorkflowStep.DATA_COLLECTION
 
     elif current_step == WorkflowStep.DATA_COLLECTION:
-        if state.get("ready_for_processing"):
+        # Check if we have both patient and encounter data
+        patient_data = state.get("patient_data")
+        encounter_data = state.get("encounter_data")
+
+        if patient_data and encounter_data and status == "processing":
+            print("✅ Moving to DATA_STRUCTURING - have patient and encounter data")
             return WorkflowStep.DATA_STRUCTURING
-        return WorkflowStep.DATA_COLLECTION
+        else:
+            print(
+                f"❌ Staying in DATA_COLLECTION - Patient: {bool(patient_data)}, Encounter: {bool(encounter_data)}, Status: {status}"
+            )
+            return WorkflowStep.DATA_COLLECTION
 
     elif current_step == WorkflowStep.DATA_STRUCTURING:
-        if state.get("structured_data") and status == "processing":
+        structured_data = state.get("structured_data")
+        if structured_data and status == "processing":
+            print("✅ Moving to MEDICAL_CODING - have structured data")
             return WorkflowStep.MEDICAL_CODING
-        return current_step
+        else:
+            print(
+                f"❌ Staying in DATA_STRUCTURING - Structured: {bool(structured_data)}, Status: {status}"
+            )
+            return current_step
 
     elif current_step == WorkflowStep.MEDICAL_CODING:
-        if state.get("suggested_codes") and status == "processing":
+        suggested_codes = state.get("suggested_codes")
+        if suggested_codes and status == "processing":
+            print("✅ Moving to ELIGIBILITY_CHECKING - have suggested codes")
             return WorkflowStep.ELIGIBILITY_CHECKING
-        return current_step
+        else:
+            print(
+                f"❌ Staying in MEDICAL_CODING - Codes: {bool(suggested_codes)}, Status: {status}"
+            )
+            return current_step
 
     elif current_step == WorkflowStep.ELIGIBILITY_CHECKING:
-        if state.get("eligibility_result") and status == "processing":
+        eligibility_result = state.get("eligibility_result")
+        if eligibility_result and status == "processing":
+            print("✅ Moving to CLAIM_PROCESSING - have eligibility result")
             return WorkflowStep.CLAIM_PROCESSING
-        return current_step
+        else:
+            print(
+                f"❌ Staying in ELIGIBILITY_CHECKING - Eligibility: {bool(eligibility_result)}, Status: {status}"
+            )
+            return current_step
 
     elif current_step == WorkflowStep.CLAIM_PROCESSING:
-        if state.get("claim_data") or state.get("done"):
+        claim_data = state.get("claim_data")
+        if claim_data or state.get("done"):
+            print("✅ Moving to COMPLETED - have claim data or done")
             return WorkflowStep.COMPLETED
-        return current_step
+        else:
+            print(f"❌ Staying in CLAIM_PROCESSING - Claim: {bool(claim_data)}")
+            return current_step
 
     else:  # COMPLETED or unknown
         return WorkflowStep.COMPLETED
