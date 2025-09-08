@@ -54,7 +54,7 @@ app = FastAPI(
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -121,20 +121,21 @@ app.include_router(
 async def legacy_chat_interface(
     message: dict, current_user: dict = Depends(get_current_user)
 ):
-    """Legacy chat interface - redirects to new AI agent endpoint"""
+    """
+    Legacy chat interface - redirects to new AI agent endpoint
+    """
+    from agents.rcm_agent import (
+        RCMAgentExecutor,
+        create_initial_state,
+        format_agent_response,
+    )
+
     user_message = message.get("message", "")
 
     if not user_message:
         raise HTTPException(status_code=400, detail="Message is required")
 
     try:
-        # Import here to avoid circular imports
-        from agents.rcm_agent import (
-            RCMAgentExecutor,
-            create_initial_state,
-            format_agent_response,
-        )
-
         # Create executor and initial state
         executor = RCMAgentExecutor()
         initial_state = create_initial_state(user_input=user_message)
@@ -164,7 +165,9 @@ async def legacy_chat_interface(
 # AI Agent Status Endpoint
 @app.get("/ai/status")
 async def ai_agent_status(current_user: dict = Depends(get_current_user)):
-    """Get AI agent status and capabilities"""
+    """
+    Get AI agent status and capabilities
+    """
     return {
         "status": "active",
         "agent_type": "RCM LangGraph Agent",
